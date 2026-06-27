@@ -1,0 +1,4 @@
+=== C5_multi_seed Multi-Seed Intersection ===
+Seeds: [42, 123, 456]
+
+Stocks appearing in top-20 across ALL seeds (0 stocks):
