@@ -61,7 +61,7 @@ def preprocess_predict_data(df, stockid2idx):
 	if len(groups) == 0:
 		raise ValueError('输入数据为空，无法预测')
 
-	num_processes = min(10, mp.cpu_count())
+	num_processes = min(4, mp.cpu_count())
 	print('cpus!!!!!!!!!!!!!!!!!!',mp.cpu_count())
 	with mp.Pool(processes=num_processes) as pool:
 		processed_list = list(tqdm(pool.imap(feature_engineer, groups), total=len(groups), desc='预测集特征工程'))
@@ -141,7 +141,9 @@ def main():
 
 	with torch.no_grad():
 		x = torch.from_numpy(sequences_np).unsqueeze(0).to(device)  # [1, N, L, F]
-		scores = model(x).squeeze(0).detach().cpu().numpy()         # [N]
+		stock_idx_list = [stockid2idx[sid] for sid in sequence_stock_ids]
+		stock_idx_tensor = torch.LongTensor(stock_idx_list).unsqueeze(0).to(device)
+		scores = model(x, stock_indices=stock_idx_tensor).squeeze(0).detach().cpu().numpy()  # [N]
 
 	order = np.argsort(scores)[::-1]
 	ranked_stock_ids = [sequence_stock_ids[i] for i in order]

@@ -7,8 +7,8 @@ config = {
     'nhead': 4,             # 注意力头数量
     'num_layers': 3,        # Transformer层数
     'dim_feedforward': 512, # 前馈网络维度
-    'batch_size': 4,        # 排序任务batch_size可以小一些，因为每个batch包含更多股票
-    'num_epochs': 50,       # 排序任务可能需要更多epochs
+    'batch_size': 2,        # 463 samples with relaxed filter; batch_size=2 for speed
+    'num_epochs': 15,       # 充分训练
     'learning_rate': 1e-5,  # 稍微降低学习率
     'dropout': 0.1,
     'feature_num': feature_num,
@@ -19,5 +19,5 @@ config = {
     'top5_weight': 2.0, # top-5样本权重（应大于base_weight）
 
     'output_dir': f'./model/{sequence_length}_{feature_num}',
-    'data_path': './data',
+    'data_path': '../../data',
 }

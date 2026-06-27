@@ -49,20 +49,8 @@ def engineer_features_158plus39(df):
 
 def engineer_features_39(df):
     """
-    计算39个技术指标特征。
-    'stock_idx','开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
-    'sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv',
-    'volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std', 
-    'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',  
-    'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'
+    计算39个技术指标特征（纯pandas/numpy实现，无需talib）。
     """
-    try:
-        import talib
-        import numpy as np
-    except ImportError:
-        print("请安装TA-Lib库: pip install TA-Lib")
-        raise
-
     df = df.copy()
 
     # 基础变量
@@ -73,42 +61,56 @@ def engineer_features_39(df):
     volume = df['成交量'].astype(float)
 
     # 移动平均线 (SMA, EMA)
-    df['sma_5'] = talib.SMA(close, timeperiod=5)
-    df['sma_20'] = talib.SMA(close, timeperiod=20)
-    df['ema_12'] = talib.EMA(close, timeperiod=12)
-    df['ema_26'] = talib.EMA(close, timeperiod=26)
-    df['ema_60'] = talib.EMA(close, timeperiod=60)
+    df['sma_5'] = close.rolling(5).mean()
+    df['sma_20'] = close.rolling(20).mean()
+    df['ema_12'] = close.ewm(span=12, adjust=False).mean()
+    df['ema_26'] = close.ewm(span=26, adjust=False).mean()
+    df['ema_60'] = close.ewm(span=60, adjust=False).mean()
 
     # MACD
-    macd_line, macd_signal_line, macd_hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
-    df['macd'] = macd_line
-    df['macd_signal'] = macd_signal_line
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-    # RSI
-    df['rsi'] = talib.RSI(close, timeperiod=14)
+    # RSI (14-period)
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta.clip(upper=0))
+    avg_gain = gain.ewm(alpha=1.0/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-12)
+    df['rsi'] = 100 - 100 / (1 + rs)
 
-    # KDJ
-    df['kdj_k'], df['kdj_d'] = talib.STOCH(high, low, close, fastk_period=9, slowk_period=3, slowd_period=3)
+    # KDJ (Stochastic)
+    low_min = low.rolling(9).min()
+    high_max = high.rolling(9).max()
+    rsv = (close - low_min) / (high_max - low_min + 1e-12) * 100
+    df['kdj_k'] = rsv.ewm(com=2, adjust=False).mean()
+    df['kdj_d'] = df['kdj_k'].ewm(com=2, adjust=False).mean()
     df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
 
     # Bollinger Bands
-    df['boll_mid'], df['boll_upper'], df['boll_lower'] = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-    # 标准差 = (上轨 - 中轨) / 2
-    df['boll_std'] = (df['boll_upper'] - df['boll_mid']) / 2
+    df['boll_mid'] = close.rolling(20).mean()
+    boll_std = close.rolling(20).std()
+    boll_upper = df['boll_mid'] + 2 * boll_std
+    df['boll_std'] = (boll_upper - df['boll_mid']) / 2
 
-    # 删除临时列
-    df.drop(columns=['boll_upper', 'boll_lower'], inplace=True)
-
-    # ATR
-    df['atr_14'] = talib.ATR(high, low, close, timeperiod=14)
+    # ATR (14-period)
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df['atr_14'] = tr.ewm(span=14, adjust=False).mean()
 
     # OBV (On-Balance Volume)
-    df['obv'] = talib.OBV(close, volume)
+    obv_dir = np.sign(close.diff()).fillna(0)
+    df['obv'] = (obv_dir * volume).cumsum()
 
     # Volume-related features
     df['volume_change'] = volume.pct_change()
-    df['volume_ma_5'] = talib.SMA(volume, timeperiod=5)
-    df['volume_ma_20'] = talib.SMA(volume, timeperiod=20)
+    df['volume_ma_5'] = volume.rolling(5).mean()
+    df['volume_ma_20'] = volume.rolling(20).mean()
     df['volume_ratio'] = df['volume_ma_5'] / df['volume_ma_20']
 
     # Returns and Volatility
@@ -126,23 +128,14 @@ def engineer_features_39(df):
 
     # 处理 inf 和 -inf
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-    # 填充 NaN 值（注意：这可能引入偏差，根据下游任务决定是否保留）
     df.fillna(0, inplace=True)
 
     return df
 
 def engineer_features(df):
     """
-    使用talib加速特征计算
+    计算158个Alpha特征（纯pandas/numpy实现，无需talib）。
     """
-    try:
-        import talib
-    except ImportError:
-        print("请安装TA-Lib库: pip install TA-Lib")
-        raise
-
-    # 为了避免修改原始DataFrame，创建一个副本
     df = df.copy()
 
     # 基础变量
@@ -157,7 +150,7 @@ def engineer_features(df):
     features = []
     feature_names = []
 
-    # 1. K-line features (9 features) - 向量化操作，速度很快，无需更改
+    # 1. K-line features (9 features)
     features.extend([
         (close - open_) / (open_ + 1e-12),
         (high - low) / (open_ + 1e-12),
@@ -171,7 +164,7 @@ def engineer_features(df):
     ])
     feature_names.extend(['KMID', 'KLEN', 'KMID2', 'KUP', 'KUP2', 'KLOW', 'KLOW2', 'KSFT', 'KSFT2'])
 
-    # 2. Price-related features (4 features) - 向量化操作，无需更改
+    # 2. Price-related features (4 features)
     features.extend([
         open_ / (close + 1e-12),
         high / (close + 1e-12),
@@ -182,50 +175,49 @@ def engineer_features(df):
 
     windows = [5, 10, 20, 30, 60]
 
-    # 3. Price change features (5 features) - 向量化操作，无需更改
+    # 3. Price change features (5 features)
     for w in windows:
         features.append(close.shift(w) / (close + 1e-12))
         feature_names.append(f'ROC{w}')
 
-    # 4. Moving average features (5 features) - 使用 talib 加速
+    # 4. Moving average features (5 features)
     for w in windows:
-        features.append(talib.SMA(close, timeperiod=w) / (close + 1e-12))
+        features.append(close.rolling(w).mean() / (close + 1e-12))
         feature_names.append(f'MA{w}')
 
-    # 5. Standard deviation features (5 features) - 使用 talib 加速
+    # 5. Standard deviation features (5 features)
     for w in windows:
-        features.append(talib.STDDEV(close, timeperiod=w) / (close + 1e-12))
+        features.append(close.rolling(w).std() / (close + 1e-12))
         feature_names.append(f'STD{w}')
 
-    # 6. Regression-based features (15 features) - 使用 talib 加速
+    # 6. Regression-based features (15 features)
     for w in windows:
-        slope = talib.LINEARREG_SLOPE(close, timeperiod=w)
+        # Linear regression slope
+        slope = close.rolling(w).apply(lambda x: np.polyfit(range(w), x, 1)[0], raw=True)
         features.append(slope / (close + 1e-12))
         feature_names.append(f'BETA{w}')
-        
-        # R-squared can be calculated as CORREL^2
-        time_period_series = pd.Series(range(w), index=close.index[:w])
-        rolling_corr = close.rolling(w).corr(time_period_series)
-        rsquare = rolling_corr**2
+
+        # R-squared
+        rsquare = close.rolling(w).apply(lambda x: np.corrcoef(range(w), x)[0, 1] ** 2 if len(x) == w and np.std(x) > 0 else 0.0, raw=True)
         features.append(rsquare)
         feature_names.append(f'RSQR{w}')
 
         # Residuals
-        intercept = talib.LINEARREG_INTERCEPT(close, timeperiod=w)
+        intercept = close.rolling(w).apply(lambda x: np.polyfit(range(w), x, 1)[1], raw=True)
         predicted = slope * (w - 1) + intercept
         resi = close - predicted
         features.append(resi / (close + 1e-12))
         feature_names.append(f'RESI{w}')
 
-    # 7. Max/Min features (10 features) - 使用 talib 加速
+    # 7. Max/Min features (10 features)
     for w in windows:
-        features.append(talib.MAX(high, timeperiod=w) / (close + 1e-12))
+        features.append(high.rolling(w).max() / (close + 1e-12))
         feature_names.append(f'MAX{w}')
     for w in windows:
-        features.append(talib.MIN(low, timeperiod=w) / (close + 1e-12))
+        features.append(low.rolling(w).min() / (close + 1e-12))
         feature_names.append(f'MIN{w}')
 
-    # 8. Quantile features (10 features) - talib 不支持，保留原实现
+    # 8. Quantile features (10 features)
     for w in windows:
         features.append(close.rolling(w).quantile(0.8) / (close + 1e-12))
         feature_names.append(f'QTLU{w}')
@@ -233,19 +225,19 @@ def engineer_features(df):
         features.append(close.rolling(w).quantile(0.2) / (close + 1e-12))
         feature_names.append(f'QTLD{w}')
 
-    # 9. Rank features (5 features) - talib 不支持，保留原实现
+    # 9. Rank features (5 features)
     for w in windows:
-        features.append(close.rolling(w).rank(pct=True))
+        features.append(close.rolling(w).apply(lambda x: (x <= x[-1]).sum() / len(x), raw=True))
         feature_names.append(f'RANK{w}')
 
-    # 10. Stochastic oscillator features (5 features) - talib.STOCH 计算的是另一指标，保留原实现
+    # 10. Stochastic oscillator features (5 features)
     for w in windows:
         min_low = low.rolling(w).min()
         max_high = high.rolling(w).max()
         features.append((close - min_low) / (max_high - min_low + 1e-12))
         feature_names.append(f'RSV{w}')
 
-    # 11. Index of Max/Min features (15 features) - talib 不支持，保留原实现
+    # 11. Index of Max/Min features (15 features)
     for w in windows:
         features.append(high.rolling(w).apply(np.argmax, raw=True) / w)
         feature_names.append(f'IMAX{w}')
@@ -258,22 +250,21 @@ def engineer_features(df):
         features.append((imax - imin) / w)
         feature_names.append(f'IMXD{w}')
 
-    # 12. Correlation features (10 features) - 使用 talib 加速
+    # 12. Correlation features (10 features)
     log_volume = np.log(volume + 1)
     for w in windows:
-        features.append(talib.CORREL(close, log_volume, timeperiod=w))
+        features.append(close.rolling(w).corr(log_volume))
         feature_names.append(f'CORR{w}')
-    
+
     close_ret = close / close.shift(1)
     volume_ret = volume / (volume.shift(1) + 1e-12)
     log_volume_ret = np.log(volume_ret + 1)
     for w in windows:
-        # talib.CORREL 需要 Series，且不能有 NaN
         corr_df = pd.concat([close_ret, log_volume_ret], axis=1).fillna(0)
-        features.append(talib.CORREL(corr_df.iloc[:, 0], corr_df.iloc[:, 1], timeperiod=w))
+        features.append(corr_df.iloc[:, 0].rolling(w).corr(corr_df.iloc[:, 1]))
         feature_names.append(f'CORD{w}')
 
-    # 13. Count features (15 features) - 向量化操作，无需更改
+    # 13. Count features (15 features)
     close_diff_pos = (close > close.shift(1))
     close_diff_neg = (close < close.shift(1))
     for w in windows:
@@ -288,7 +279,7 @@ def engineer_features(df):
         features.append(cntp - cntn)
         feature_names.append(f'CNTD{w}')
 
-    # 14. Sum of price change features (15 features) - 向量化操作，无需更改
+    # 14. Sum of price change features (15 features)
     close_diff_abs = (close - close.shift(1)).abs()
     close_diff_up = (close - close.shift(1)).clip(lower=0)
     close_diff_down = -(close - close.shift(1)).clip(upper=0)
@@ -309,15 +300,15 @@ def engineer_features(df):
         features.append((sum_up - sum_down) / (sum_abs + 1e-12))
         feature_names.append(f'SUMD{w}')
 
-    # 15. Volume-related features (10 features) - 使用 talib 加速
+    # 15. Volume-related features (10 features)
     for w in windows:
-        features.append(talib.SMA(volume, timeperiod=w) / (volume + 1e-12))
+        features.append(volume.rolling(w).mean() / (volume + 1e-12))
         feature_names.append(f'VMA{w}')
     for w in windows:
-        features.append(talib.STDDEV(volume, timeperiod=w) / (volume + 1e-12))
+        features.append(volume.rolling(w).std() / (volume + 1e-12))
         feature_names.append(f'VSTD{w}')
 
-    # 16. Weighted volume features (5 features) - 向量化操作，无需更改
+    # 16. Weighted volume features (5 features)
     vol_weighted_ret = (close / close.shift(1) - 1).abs() * volume
     for w in windows:
         mean_vol_w_ret = vol_weighted_ret.rolling(w).mean()
@@ -325,7 +316,7 @@ def engineer_features(df):
         features.append(std_vol_w_ret / (mean_vol_w_ret + 1e-12))
         feature_names.append(f'WVMA{w}')
 
-    # 17. Volume change sum features (15 features) - 向量化操作，无需更改
+    # 17. Volume change sum features (15 features)
     volume_diff_abs = (volume - volume.shift(1)).abs()
     volume_diff_up = (volume - volume.shift(1)).clip(lower=0)
     volume_diff_down = -(volume - volume.shift(1)).clip(upper=0)
@@ -349,10 +340,10 @@ def engineer_features(df):
     # Combine all features into a new DataFrame
     feature_df = pd.concat(features, axis=1)
     feature_df.columns = feature_names
-    
+
     # Merge with original df
     df = pd.concat([df, feature_df], axis=1)
-    
+
     # 填充缺失值
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.fillna(0, inplace=True)
@@ -576,10 +567,10 @@ def create_ranking_dataset_vectorized(data, features, sequence_length, ranking_d
             if end_idx + 5 >= n:
                 continue
 
-            # 未来 5 条数据日期必须连续（自然日相邻）
+            # 未来 5 条数据中至少有 4 条在自然日上连续（允许 1 天节假日间隙）
             future_dates = dates_day[end_idx + 1:end_idx + 6]
             future_diffs = np.diff(future_dates).astype(np.int64)
-            if not np.all(future_diffs == 1):
+            if np.sum(future_diffs == 1) < 3:
                 continue
 
             seq = feature_values[i : i + sequence_length]   # (L, F)

@@ -12,10 +12,31 @@ wheels/
 
 
 .DS_Store
-
 .vscode
 
+# Archives
 *.zip
-
 *.tar
 
+# Model artifacts (large binaries)
+*.pth
+*.pkl
+*.pt
+*.h5
+
+# Logs and temp
+*.log
+*.stackdump
+events.out.*
+log/
+
+# Large data files (regenerated from baostock)
+data/stock_data.csv
+data/train.csv
+data/test.csv
+
+# Model output dirs with binaries
+code/src/output/
+model/60_158+39/log/
+model/60_39/
+code/src/model60_39train_output.log

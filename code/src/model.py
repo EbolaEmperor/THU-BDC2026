@@ -60,11 +60,20 @@ class StockTransformer(nn.Module):
         self.model_type = 'RankingTransformer'
         self.config = config
         self.num_stocks = num_stocks
-        
+
+        # ---- Stock Identity Embedding (opt-in via config) ----
+        self.stock_emb_dim = config.get('stock_emb_dim', 0)
+        if self.stock_emb_dim > 0:
+            self.stock_embedding = nn.Embedding(num_stocks, self.stock_emb_dim)
+            self.stock_emb_proj = nn.Linear(self.stock_emb_dim, config['d_model'])
+        else:
+            self.stock_embedding = None
+            self.stock_emb_proj = None
+
         # 输入投影层
         self.input_proj = nn.Linear(input_dim, config['d_model'])
         self.pos_encoder = PositionalEncoding(config['d_model'], config['dropout'], config['sequence_length'])
-        
+
         # 时序特征提取
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config['d_model'],
@@ -74,12 +83,21 @@ class StockTransformer(nn.Module):
             batch_first=True
         )
         self.temporal_encoder = nn.TransformerEncoder(encoder_layer, num_layers=config['num_layers'])
-        
+
         # 特征注意力
         self.feature_attention = FeatureAttention(config['d_model'], config['dropout'])
-        
-        # 股票间交互注意力
-        self.cross_stock_attention = CrossStockAttention(config['d_model'], config['nhead'], config['dropout'])
+
+        # ---- Cross-Stock Attention (supports multiple layers via config) ----
+        self.cross_layers = config.get('cross_layers', 1)
+        if self.cross_layers > 1:
+            self.cross_stock_attention_list = nn.ModuleList([
+                CrossStockAttention(config['d_model'], config['nhead'], config['dropout'])
+                for _ in range(self.cross_layers)
+            ])
+            self.cross_stock_attention = None  # not used when multi-layer
+        else:
+            self.cross_stock_attention = CrossStockAttention(config['d_model'], config['nhead'], config['dropout'])
+            self.cross_stock_attention_list = None
         
         # 排序特异性层
         self.ranking_layers = nn.Sequential(
@@ -112,40 +130,55 @@ class StockTransformer(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
     
-    def forward(self, src):
+    def forward(self, src, stock_indices=None):
         # src: [batch, num_stocks, seq_len, feature_dim]
         batch_size, num_stocks, seq_len, feature_dim = src.size()
-        
+
         # 重塑为 [batch*num_stocks, seq_len, feature_dim]
         src_reshaped = src.view(batch_size * num_stocks, seq_len, feature_dim)
-        
+
         # 输入投影和位置编码
         src_proj = self.input_proj(src_reshaped)  # [batch*num_stocks, seq_len, d_model]
+
+        # Add stock identity embedding if enabled
+        if self.stock_embedding is not None and stock_indices is not None:
+            # stock_indices: [batch, num_stocks] -> [batch*num_stocks]
+            flat_idx = stock_indices.view(-1).long()               # ensure int64
+            flat_idx = flat_idx.clamp(0, self.num_stocks - 1)      # safety clamp
+            emb = self.stock_embedding(flat_idx)                    # [B*N, emb_dim]
+            emb = self.stock_emb_proj(emb)                         # [B*N, d_model]
+            src_proj = src_proj + emb.unsqueeze(1)                 # broadcast across seq_len
+
         src_proj = self.pos_encoder(src_proj)
-        
+
         # 时序特征提取
         temporal_features = self.temporal_encoder(src_proj)  # [batch*num_stocks, seq_len, d_model]
-        
+
         # 特征注意力聚合
         aggregated_features = self.feature_attention(temporal_features)  # [batch*num_stocks, d_model]
-        
+
         # 重塑回股票维度用于股票间交互
         stock_features = aggregated_features.view(batch_size, num_stocks, -1)  # [batch, num_stocks, d_model]
-        
-        # 股票间交互注意力
-        interactive_features = self.cross_stock_attention(stock_features)  # [batch, num_stocks, d_model]
-        
+
+        # 股票间交互注意力（支持多层）
+        if self.cross_stock_attention_list is not None:
+            interactive_features = stock_features
+            for cross_layer in self.cross_stock_attention_list:
+                interactive_features = cross_layer(interactive_features)
+        else:
+            interactive_features = self.cross_stock_attention(stock_features)
+
         # 重塑回原形状
         interactive_features = interactive_features.view(batch_size * num_stocks, -1)
-        
+
         # 排序特异性变换
         ranking_features = self.ranking_layers(interactive_features)  # [batch*num_stocks, d_model//2]
-        
+
         # 生成排序分数
         scores = self.score_head(ranking_features)  # [batch*num_stocks, 1]
-        
+
         # 重塑为最终输出格式
         output = scores.view(batch_size, num_stocks)  # [batch, num_stocks]
-        
+
         return output
 

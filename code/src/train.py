@@ -68,7 +68,7 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
     if len(groups) == 0:
         raise ValueError(f"{desc}输入为空，无法继续")
 
-    num_processes = min(10, mp.cpu_count())
+    num_processes = min(2, mp.cpu_count())
     with mp.Pool(processes=num_processes) as pool:
         processed_list = list(tqdm(pool.imap(feature_engineer, groups), total=len(groups), desc=desc))
 
@@ -320,34 +320,42 @@ def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, 
         optimizer.zero_grad()
         
         # 模型预测
-        outputs = model(sequences)  # [batch, max_stocks] 预测分数
-        
+        stock_indices_batch = batch.get('stock_indices', None)
+        if stock_indices_batch is not None:
+            stock_indices_batch = stock_indices_batch.to(device)
+        outputs = model(sequences, stock_indices=stock_indices_batch)  # [batch, max_stocks] 预测分数
+
         # 应用mask，只考虑有效股票
         masked_outputs = outputs * masks + (1 - masks) * (-1e9)  # 无效位置设为很小的值
         masked_targets = targets * masks
         masked_relevance = relevance.float() * masks  # 使用预处理好的相关性得分
-        
+
         # 计算损失（只对有效股票计算）
         batch_loss = None
         batch_size = sequences.size(0)
-        
+
         for i in range(batch_size):
             mask = masks[i]
             valid_indices = mask.nonzero().squeeze()
-            
+
             if valid_indices.numel() == 0:
                 continue
-                
+
             if valid_indices.dim() == 0:
                 valid_indices = valid_indices.unsqueeze(0)
-            
-            # 获取有效股票的预测值和预处理好的相关性得分
+
+            # 获取有效股票的预测值和标签
             valid_pred = masked_outputs[i][valid_indices]
             valid_relevance = masked_relevance[i][valid_indices]
-            
+            valid_targets = masked_targets[i][valid_indices]
+
             if len(valid_pred) > 1:
-                # 直接使用预处理好的相关性得分，无需重新计算
-                loss = criterion(valid_pred.unsqueeze(0), valid_relevance.unsqueeze(0))
+                # 根据 train_label_mode 选择 loss 输入
+                if config.get('train_label_mode') == 'raw_return':
+                    label_input = valid_targets.unsqueeze(0)
+                else:
+                    label_input = valid_relevance.unsqueeze(0)
+                loss = criterion(valid_pred.unsqueeze(0), label_input)
                 batch_loss = batch_loss + loss if isinstance(batch_loss, torch.Tensor) else loss
         
         if batch_loss is not None:
@@ -393,9 +401,12 @@ def evaluate_ranking_model(model, dataloader, criterion, device, writer, epoch):
             sequences = batch['sequences'].to(device)
             targets = batch['targets'].to(device)
             masks = batch['masks'].to(device)
-            
-            # 模型预测
-            outputs = model(sequences)
+
+            # 模型预测（传入 stock_indices）
+            stock_indices_batch = batch.get('stock_indices', None)
+            if stock_indices_batch is not None:
+                stock_indices_batch = stock_indices_batch.to(device)
+            outputs = model(sequences, stock_indices=stock_indices_batch)
             
             # 应用mask
             masked_outputs = outputs * masks + (1 - masks) * (-1e9)
@@ -488,7 +499,8 @@ def predict_top_stocks(model, data, features, sequence_length, scaler, stockid2i
     
     with torch.no_grad():
         # 模型预测
-        outputs = model(sequences)  # [1, num_stocks]
+        stock_idx_tensor = torch.LongTensor(day_stock_indices).unsqueeze(0).to(device)
+        outputs = model(sequences, stock_indices=stock_idx_tensor)  # [1, num_stocks]
         scores = outputs.squeeze().cpu().numpy()  # [num_stocks]
         
         # 获取排名前top_k的股票
@@ -547,7 +559,8 @@ def split_train_val_by_last_month(df, sequence_length):
     return train_df, val_df, val_start
 
 # 主程序
-def main():
+def main(model_factory=None, train_fn_override=None,
+         scheduler_cfg=None, criterion_override=None):
     set_seed(config.get('seed', 42))
     output_dir = config['output_dir']
     os.makedirs(output_dir,exist_ok=True)
@@ -586,9 +599,15 @@ def main():
     # 丢弃nan数据
     train_data = train_data.dropna(subset=features)
     val_data = val_data.dropna(subset=features)
+    # 保存原始 instrument（int64 股票索引），scaler 会把它变成 float
+    train_instrument_raw = train_data['instrument'].copy()
+    val_instrument_raw = val_data['instrument'].copy()
     # 然后再缩放
     train_data[features] = scaler.fit_transform(train_data[features])
     val_data[features] = scaler.transform(val_data[features])
+    # 恢复原始 instrument 索引（用于 groupby 和 embedding lookup）
+    train_data['instrument'] = train_instrument_raw
+    val_data['instrument'] = val_instrument_raw
     joblib.dump(scaler, os.path.join(output_dir, 'scaler.pkl'))
 
     
@@ -633,20 +652,35 @@ def main():
     )
     
     # 6. 模型初始化
-    model = StockTransformer(input_dim=len(features), config=config, num_stocks=num_stocks)
+    if model_factory is not None:
+        model = model_factory(input_dim=len(features), config=config, num_stocks=num_stocks)
+    else:
+        model = StockTransformer(input_dim=len(features), config=config, num_stocks=num_stocks)
     model.to(device)
     print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
     # 7. 损失函数和优化器
-    criterion = WeightedRankingLoss(
-        k=5,
-        temperature=1.0,
-        weight_factor=config['top5_weight'],
-        pairwise_weight=config['pairwise_weight'],
-        base_weight=config.get('base_weight', 1.0)
-    )  # 使用加权排序损失
+    if criterion_override is not None:
+        criterion = criterion_override
+    else:
+        criterion = WeightedRankingLoss(
+            k=5,
+            temperature=1.0,
+            weight_factor=config['top5_weight'],
+            pairwise_weight=config['pairwise_weight'],
+            base_weight=config.get('base_weight', 1.0)
+        )
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.2, total_iters=config['num_epochs'])
+    if scheduler_cfg is not None:
+        sched_type = scheduler_cfg.get('type', 'linear')
+        if sched_type == 'cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=scheduler_cfg['T_max'], eta_min=scheduler_cfg.get('eta_min', 1e-6))
+        else:
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=1.0, end_factor=0.2, total_iters=config['num_epochs'])
+    else:
+        scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.2, total_iters=config['num_epochs'])
     
     # 8. 排序模型训练
     if is_train:
@@ -657,7 +691,8 @@ def main():
             print(f"\n=== Epoch {epoch+1}/{config['num_epochs']} ===")
             
             # 训练
-            train_loss, train_metrics = train_ranking_model(
+            _train_fn = train_fn_override if train_fn_override is not None else train_ranking_model
+            train_loss, train_metrics = _train_fn(
                 model, train_loader, criterion, optimizer, device, epoch, writer
             )
             
