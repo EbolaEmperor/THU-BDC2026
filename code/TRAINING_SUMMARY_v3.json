@@ -1,0 +1,42 @@
+{
+  "results": {
+    "C2_emb64": {
+      "success": true,
+      "elapsed_min": 28.7,
+      "skipped": false,
+      "branch": "c2-emb64"
+    },
+    "C3_high_dropout": {
+      "success": true,
+      "elapsed_min": 28.3,
+      "skipped": false,
+      "branch": "c3-high-dropout"
+    },
+    "C4_high_lr": {
+      "success": true,
+      "elapsed_min": 28.3,
+      "skipped": false,
+      "branch": "c4-high-lr"
+    },
+    "C5_multi_seed": {
+      "success": true,
+      "elapsed_min": 84.5,
+      "skipped": false,
+      "branch": "c5-multi-seed"
+    },
+    "C6_wider_model": {
+      "success": true,
+      "elapsed_min": 46.3,
+      "skipped": false,
+      "branch": "c6-wider-model"
+    },
+    "C7_loss_tune": {
+      "success": true,
+      "elapsed_min": 27.9,
+      "skipped": false,
+      "branch": "c7-loss-tune"
+    }
+  },
+  "total_min": 244.0,
+  "completed_at": "2026-06-28 06:19:52"
+}
